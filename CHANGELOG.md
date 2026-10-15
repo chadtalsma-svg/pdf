@@ -1,5 +1,12 @@
 # @happyvertical/pdf
 
+## 0.66.0
+
+### Minor Changes
+
+- 38cde74: Add an explicit PaddleOCR-VL document parsing client with structured page results,
+  Markdown, cancellation, size limits, and a cold-start-aware timeout.
+
 ## 0.65.10
 
 ### Patch Changes
