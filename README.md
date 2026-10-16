@@ -384,7 +384,7 @@ switch to it without change:
 | Operation | Served by |
 | --- | --- |
 | `extractText` | PaddleOCR-VL. Returns its Markdown (tables as HTML); `pages` selects from the parsed pages, so the whole document is parsed once per call. |
-| `performOCR(images)` | PaddleOCR-VL, one request per image, in order. PNG and JPEG are sent as they are; raw pixels are encoded to PNG first. `confidence` is 100 for any text (the service reports none). |
+| `performOCR(images)` | PaddleOCR-VL, one request per image, in order. PNG and JPEG are sent as they are; WebP and raw pixels are converted to PNG first. `confidence` is 100 for any text (the service reports none). |
 | `getInfo`, `extractMetadata`, `extractImages`, `renderPages` | Local `unpdf`. The service returns no document metadata, embedded images or page rasters. |
 
 ```typescript
@@ -406,11 +406,18 @@ const markdown = await reader.extractText('/path/to/scan.pdf');
   still go to the service. `extractText(..., { skipOCRFallback: true })` always
   returns only the local text layer.
 - **No fallback.** A service failure throws `PaddleOCRError`. The reader never
-  retries and never substitutes a local OCR engine. `ocrProvider` cannot be
-  combined with it.
-- **Limits.** `paddleocr.maxFileSize` and `paddleocr.timeout` default to the
-  reader's `maxFileSize` and `timeout`, then to 50 MiB and 65 minutes. A
-  shorter `timeout` also bounds the service's cold start.
+  retries and never substitutes a local OCR engine. Any `ocrProvider` other
+  than `auto` (including `tesseract`) is refused.
+- **Limits.** `paddleocr.maxFileSize` defaults to the reader's `maxFileSize`,
+  then 50 MiB. `paddleocr.timeout` defaults to 65 minutes and does not inherit
+  the reader's `timeout`, which is sized for local parsing; a shorter value
+  also bounds the service's cold start.
+- **Pages.** If the service returns a different number of pages than the
+  document has, `extractText` throws `PaddleOCRError` (`EPADDLERESPONSE`)
+  rather than returning short text. `enableOCR: false` reads only the local
+  text layer and sends nothing.
+- **Images.** WebP (the default output of `extractImages`) is converted to PNG
+  before it is sent.
 
 Use `PaddleOCRClient` directly when you need the per-page `layout` objects.
 

@@ -7,6 +7,7 @@
  * see one complete reader. Selected only by name, never by `auto`.
  */
 
+import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { BasePDFReader } from '../shared/base';
 import type {
   DependencyCheckResult,
@@ -23,7 +24,11 @@ import type {
 } from '../shared/types';
 import { PDFError } from '../shared/types';
 import { encodePDFImage } from './image-encoding';
-import { PaddleOCRClient, type PaddleOCRClientOptions } from './paddleocr';
+import {
+  PaddleOCRClient,
+  type PaddleOCRClientOptions,
+  PaddleOCRError,
+} from './paddleocr';
 import { UnpdfProvider } from './unpdf';
 
 /** Options for `getPDFReader({ provider: 'paddleocr', paddleocr })`. */
@@ -35,6 +40,12 @@ export interface PaddleOCRReaderOptions extends PaddleOCRClientOptions {
    * service reads every document.
    */
   preferEmbeddedText?: boolean;
+  /**
+   * `false` keeps every document local: text comes from the text layer only,
+   * as with `skipOCRFallback`, and nothing is sent to the service. Mirrors the
+   * reader's `enableOCR`. Default: true.
+   */
+  enableOCR?: boolean;
 }
 
 const ENCODED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg']);
@@ -45,6 +56,14 @@ function imageBytes(data: PDFImage['data']): Uint8Array {
     return Buffer.from(data.replace(/^data:[^,]*,/, ''), 'base64');
   }
   return data;
+}
+
+/** Decode a WebP (which the service may not accept) and re-encode it as PNG. */
+async function webpToPng(data: Uint8Array): Promise<Uint8Array> {
+  const image = await loadImage(Buffer.from(data));
+  const canvas = createCanvas(image.width, image.height);
+  canvas.getContext('2d').drawImage(image, 0, 0);
+  return canvas.encode('png');
 }
 
 /**
@@ -63,17 +82,19 @@ export class PaddleOCRProvider extends BasePDFReader {
   private readonly client: PaddleOCRClient;
   private readonly local = new UnpdfProvider();
   private readonly preferEmbeddedText: boolean;
+  private readonly enableOCR: boolean;
   private readonly maxFileSize: number;
 
   constructor(options: PaddleOCRReaderOptions = {}) {
     super();
-    const { preferEmbeddedText, ...clientOptions } = options;
+    const { preferEmbeddedText, enableOCR, ...clientOptions } = options;
     // Validates baseUrl, timeout and size up front, so misconfiguration fails
     // when the reader is created rather than on the first document.
     this.client = new PaddleOCRClient(clientOptions);
     this.preferEmbeddedText =
       preferEmbeddedText ??
       process.env.HAVE_PDF_PADDLEOCR_PREFER_EMBEDDED_TEXT === 'true';
+    this.enableOCR = enableOCR ?? true;
     this.maxFileSize = clientOptions.maxFileSize ?? 50 * 1024 * 1024;
   }
 
@@ -81,17 +102,22 @@ export class PaddleOCRProvider extends BasePDFReader {
     source: PDFSource,
     options?: ExtractTextOptions,
   ): Promise<string | null> {
-    if (options?.skipOCRFallback) {
+    if (options?.skipOCRFallback || !this.enableOCR) {
       return this.local.extractText(source, options);
     }
-    if (this.preferEmbeddedText) {
-      const info = await this.local.getInfo(source);
-      if (info.recommendedStrategy === 'text') {
-        return this.local.extractText(source, options);
-      }
+    const info = await this.local.getInfo(source);
+    if (this.preferEmbeddedText && info.recommendedStrategy === 'text') {
+      return this.local.extractText(source, options);
     }
 
     const result = await this.client.parse(source);
+    if (result.pages.length !== info.pageCount) {
+      // A service that capped or merged pages must not pass for blank pages.
+      throw new PaddleOCRError(
+        `PaddleOCR returned ${result.pages.length} pages for a ${info.pageCount}-page document`,
+        'EPADDLERESPONSE',
+      );
+    }
     const pages = this.normalizePages(options?.pages, result.pages.length);
     const text = this.mergePageTexts(
       pages.map((page) => result.pages[page - 1].markdown),
@@ -108,9 +134,12 @@ export class PaddleOCRProvider extends BasePDFReader {
     const texts: string[] = [];
     for (const image of images) {
       let data = imageBytes(image.data);
-      if (!ENCODED_IMAGE_TYPES.has(image.format ?? '')) {
-        // Raw pixel buffers and WebP are encoded first; already-encoded PNG
-        // or JPEG bytes pass through unchanged.
+      if (image.format === 'image/webp') {
+        // extractImages() emits WebP by default.
+        data = await webpToPng(data);
+      } else if (!ENCODED_IMAGE_TYPES.has(image.format ?? '')) {
+        // Raw pixel buffers are encoded first; already-encoded PNG or JPEG
+        // bytes pass through unchanged.
         const encoded = await encodePDFImage({ ...image, data }, 'png');
         if (!ENCODED_IMAGE_TYPES.has(encoded.format ?? '')) {
           throw new PDFError(

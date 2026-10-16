@@ -19,7 +19,16 @@ const bornDigital = () =>
     `# Mill certificate\n\n${'Heat number 12345 grade A36. '.repeat(40)}`,
   );
 
-const pageMarkdown = ['# Page one', '<table><tr><td>Heat</td></tr></table>'];
+// One entry per page of the scanned fixture.
+const pageMarkdown = [
+  '# Page one',
+  '<table><tr><td>Heat</td></tr></table>',
+  'Page three',
+];
+const json = (res: import('node:http').ServerResponse, value: unknown) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(value));
+};
 const envelope = (pages: string[]) => ({
   errorCode: 0,
   logId: 'request-1',
@@ -167,12 +176,10 @@ describe("getPDFReader({ provider: 'paddleocr' })", () => {
     expect(local).toContain('Heat number 12345');
     expect(calls).toHaveLength(0);
 
+    respond = (res) => json(res, envelope(['scanned']));
     const scan = await imagesToPdf([png(400, 300)], { pageSize: 'letter' });
-    expect(await reader.extractText(scan)).toBe(pageMarkdown.join('\n\n'));
-    expect(await reader.extractText(scannedPdfPath)).toBe(
-      pageMarkdown.join('\n\n'),
-    );
-    expect(calls).toHaveLength(2);
+    expect(await reader.extractText(scan)).toBe('scanned');
+    expect(calls).toHaveLength(1);
   });
 
   it('OCRs images one request each, in order, encoding raw pixels as PNG first', async () => {
@@ -229,6 +236,80 @@ describe("getPDFReader({ provider: 'paddleocr' })", () => {
         { data: new Uint8Array([1, 2, 3]), format: 'application/octet-stream' },
       ]),
     ).rejects.toThrow(/PNG or JPEG/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses tesseract and any other named OCR engine', async () => {
+    for (const ocrProvider of ['tesseract', 'onnx']) {
+      await expect(
+        getPDFReader({
+          provider: 'paddleocr',
+          ocrProvider,
+          paddleocr: { baseUrl },
+        }),
+      ).rejects.toThrow(/does not support OCR provider/);
+    }
+    vi.stubEnv('HAVE_PDF_OCR_PROVIDER', 'tesseract');
+    await expect(
+      getPDFReader({ provider: 'paddleocr', paddleocr: { baseUrl } }),
+    ).rejects.toThrow(/does not support OCR provider 'tesseract'/);
+  });
+
+  it('OCRs WebP images (the default output of extractImages)', async () => {
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      paddleocr: { baseUrl },
+    });
+    respond = (res) => json(res, envelope(['rendered']));
+    const [page] = await reader.renderPages(await bornDigital(), {
+      pages: [1],
+      outputFormat: 'webp',
+    });
+    expect(page.format).toBe('image/webp');
+
+    const result = await reader.performOCR([page]);
+
+    expect(result.text).toBe('rendered');
+    const sent = Buffer.from(calls[0].file, 'base64');
+    expect(sent.subarray(1, 4).toString('ascii')).toBe('PNG');
+  });
+
+  it('does not inherit the reader timeout', async () => {
+    vi.stubEnv('HAVE_PDF_TIMEOUT', '1');
+    respond = (res) => {
+      setTimeout(() => json(res, envelope(pageMarkdown)), 50);
+    };
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      paddleocr: { baseUrl },
+    });
+    expect(await reader.extractText(scannedPdfPath)).toBe(
+      pageMarkdown.join('\n\n'),
+    );
+  });
+
+  it('throws when the service returns a different page count', async () => {
+    respond = (res) => json(res, envelope(['only one']));
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      paddleocr: { baseUrl },
+    });
+    const error = await reader
+      .extractText(scannedPdfPath, { pages: [3] })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(PaddleOCRError);
+    expect(error.code).toBe('EPADDLERESPONSE');
+  });
+
+  it('with enableOCR: false, reads the text layer and sends nothing', async () => {
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      enableOCR: false,
+      paddleocr: { baseUrl },
+    });
+    expect(await reader.extractText(await bornDigital())).toContain(
+      'Heat number 12345',
+    );
     expect(calls).toHaveLength(0);
   });
 });

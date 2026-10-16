@@ -348,7 +348,8 @@ export async function getPDFReader(
         );
       }
 
-      if (requiresExternalOCRProvider(readerOptions.ocrProvider)) {
+      // Any named engine, tesseract included, would be silently replaced.
+      if (readerOptions.ocrProvider && readerOptions.ocrProvider !== 'auto') {
         throw new Error(
           `paddleocr provider does not support OCR provider '${readerOptions.ocrProvider}': PaddleOCR-VL performs its OCR.`,
         );
@@ -363,9 +364,9 @@ export async function getPDFReader(
         ...(readerOptions.maxFileSize !== undefined
           ? { maxFileSize: readerOptions.maxFileSize }
           : {}),
-        ...(readerOptions.timeout !== undefined
-          ? { timeout: readerOptions.timeout }
-          : {}),
+        // The reader's timeout is not inherited: a limit sized for local
+        // parsing would cut off the service's cold start.
+        ...(readerOptions.enableOCR === false ? { enableOCR: false } : {}),
         ...readerOptions.paddleocr,
       });
     }
