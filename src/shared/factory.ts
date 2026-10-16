@@ -59,7 +59,8 @@ function isRuntimeProvider(value: string): value is RuntimeProvider {
     value === 'auto' ||
     value === 'unpdf' ||
     value === 'pdfjs' ||
-    value === 'kreuzberg'
+    value === 'kreuzberg' ||
+    value === 'paddleocr'
   );
 }
 
@@ -203,7 +204,7 @@ async function canUseKreuzberg(options: PDFReaderOptions): Promise<boolean> {
  *
  * // Configure with specific options
  * const reader = await getPDFReader({
- *   provider: 'auto',           // 'kreuzberg', 'unpdf', 'pdfjs', or 'auto'
+ *   provider: 'auto',           // 'kreuzberg', 'unpdf', 'pdfjs', 'paddleocr', or 'auto'
  *   enableOCR: true,            // Enable OCR fallback for image-based PDFs
  *   timeout: 30000,             // 30 second timeout for operations
  *   maxFileSize: 50 * 1024 * 1024, // 50MB file size limit
@@ -340,6 +341,35 @@ export async function getPDFReader(
       });
     }
 
+    case 'paddleocr': {
+      if (!isNode) {
+        throw new Error(
+          'paddleocr provider is only available in Node.js environments',
+        );
+      }
+
+      if (requiresExternalOCRProvider(readerOptions.ocrProvider)) {
+        throw new Error(
+          `paddleocr provider does not support OCR provider '${readerOptions.ocrProvider}': PaddleOCR-VL performs its OCR.`,
+        );
+      }
+
+      // Never reached from 'auto': this provider sends documents to a remote
+      // service, which a caller must choose on purpose.
+      const { PaddleOCRProvider } = await import(
+        '../node/paddleocr-provider.js'
+      );
+      return new PaddleOCRProvider({
+        ...(readerOptions.maxFileSize !== undefined
+          ? { maxFileSize: readerOptions.maxFileSize }
+          : {}),
+        ...(readerOptions.timeout !== undefined
+          ? { timeout: readerOptions.timeout }
+          : {}),
+        ...readerOptions.paddleocr,
+      });
+    }
+
     case 'pdfjs': {
       if (!isBrowser) {
         throw new Error(
@@ -364,6 +394,8 @@ export async function getPDFReader(
  *
  * Different providers are available depending on the runtime:
  * - Node.js: ['kreuzberg', 'unpdf'] - kreuzberg (preferred, memory-efficient) and unpdf
+ * - 'paddleocr' is never listed: it needs a configured remote service. Name it
+ *   explicitly; getProviderInfo('paddleocr') reports whether it is configured.
  * - Browser: ['pdfjs'] - Text extraction and basic metadata (planned)
  * - Edge/Unknown: [] - No providers available
  *
@@ -488,7 +520,9 @@ export async function getProviderInfo(
 
     return {
       provider,
-      available: isProviderAvailable(provider),
+      // paddleocr is not in getAvailableProviders() (it needs a configured
+      // service); constructing it above succeeded, so it is available.
+      available: provider === 'paddleocr' || isProviderAvailable(provider),
       capabilities,
       dependencies,
     };

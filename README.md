@@ -251,9 +251,12 @@ options. Explicit options always win.
 | --- | --- | --- |
 | `HAVE_PDF_ENABLE_OCR` | boolean | `true` |
 | `HAVE_PDF_TIMEOUT` | number | `30000` |
-| `HAVE_PDF_PROVIDER` | string | `auto`, `unpdf`, `kreuzberg` |
+| `HAVE_PDF_PROVIDER` | string | `auto`, `unpdf`, `kreuzberg`, `paddleocr` |
 | `HAVE_PDF_OCR_PROVIDER` | string | `auto`, `tesseract`, `onnx` |
 | `HAVE_PDF_MAX_FILE_SIZE` | number | `52428800` |
+| `HAVE_PDF_PADDLEOCR_URL` | string | `http://paddleocr-vl:8080` |
+| `HAVE_PDF_PADDLEOCR_API_KEY` | string | bearer token, optional |
+| `HAVE_PDF_PADDLEOCR_PREFER_EMBEDDED_TEXT` | boolean | `true` |
 
 ## Providers
 
@@ -262,6 +265,9 @@ options. Explicit options always win.
   fallback through `@happyvertical/ocr`.
 - `kreuzberg`: optional Node.js provider via `@kreuzberg/node`; useful when
   available, but not required.
+- `paddleocr`: Node.js reader backed by a remote PaddleOCR-VL service (see
+  [PaddleOCR-VL as a reader](#paddleocr-vl-as-a-reader)). Used only when named;
+  `auto` never selects it.
 
 The `pdfjs` provider is not a stable public package target yet.
 
@@ -368,10 +374,53 @@ MIT. See [LICENSE](LICENSE).
 
 ## Remote PaddleOCR-VL document parsing
 
+### PaddleOCR-VL as a reader
+
+`getPDFReader({ provider: 'paddleocr' })` (or `HAVE_PDF_PROVIDER=paddleocr`)
+returns a complete `PDFReader` that reads through a PaddleOCR-VL
+`/layout-parsing` service, so code written against the reader interface can
+switch to it without change:
+
+| Operation | Served by |
+| --- | --- |
+| `extractText` | PaddleOCR-VL. Returns its Markdown (tables as HTML); `pages` selects from the parsed pages, so the whole document is parsed once per call. |
+| `performOCR(images)` | PaddleOCR-VL, one request per image, in order. PNG and JPEG are sent as they are; raw pixels are encoded to PNG first. `confidence` is 100 for any text (the service reports none). |
+| `getInfo`, `extractMetadata`, `extractImages`, `renderPages` | Local `unpdf`. The service returns no document metadata, embedded images or page rasters. |
+
+```typescript
+const reader = await getPDFReader({
+  provider: 'paddleocr',
+  paddleocr: {
+    baseUrl: 'http://paddleocr-vl:8080', // or HAVE_PDF_PADDLEOCR_URL
+    preferEmbeddedText: false, // true: read text-layer PDFs locally
+  },
+});
+const markdown = await reader.extractText('/path/to/scan.pdf');
+```
+
+- **Explicit only.** The document leaves the process, so `auto` never picks
+  this provider. A missing or invalid service URL fails at `getPDFReader()`.
+- **Embedded text.** By default the service reads every document, including
+  ones with a text layer. With `preferEmbeddedText: true`, a document whose
+  `getInfo` strategy is `text` is read locally instead; scanned and mixed ones
+  still go to the service. `extractText(..., { skipOCRFallback: true })` always
+  returns only the local text layer.
+- **No fallback.** A service failure throws `PaddleOCRError`. The reader never
+  retries and never substitutes a local OCR engine. `ocrProvider` cannot be
+  combined with it.
+- **Limits.** `paddleocr.maxFileSize` and `paddleocr.timeout` default to the
+  reader's `maxFileSize` and `timeout`, then to 50 MiB and 65 minutes. A
+  shorter `timeout` also bounds the service's cold start.
+
+Use `PaddleOCRClient` directly when you need the per-page `layout` objects.
+
+### The client
+
 Use the explicit `PaddleOCRClient` when you want the full layout-aware PaddleOCR
 pipeline, including tables and page structure, even for PDFs with embedded text.
-It calls `/layout-parsing`, not an OpenAI-compatible VLM endpoint. Existing
-`getPDFReader()` selection and image OCR providers are unchanged.
+It calls `/layout-parsing`, not an OpenAI-compatible VLM endpoint. The
+`paddleocr` reader above is built on it; `auto` selection and the image OCR
+providers are unchanged.
 
 ```typescript
 import { PaddleOCRClient } from '@happyvertical/pdf';
