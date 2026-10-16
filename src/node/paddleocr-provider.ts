@@ -9,6 +9,7 @@
 
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { BasePDFReader } from '../shared/base';
+import { canonicalizeImageFormat } from '../shared/image-format';
 import type {
   DependencyCheckResult,
   ExtractImagesOptions,
@@ -60,7 +61,12 @@ function imageBytes(data: PDFImage['data']): Uint8Array {
 
 /** Decode a WebP (which the service may not accept) and re-encode it as PNG. */
 async function webpToPng(data: Uint8Array): Promise<Uint8Array> {
-  const image = await loadImage(Buffer.from(data));
+  let image: Awaited<ReturnType<typeof loadImage>>;
+  try {
+    image = await loadImage(Buffer.from(data));
+  } catch {
+    throw new PDFError('WebP image could not be decoded', 'EINVAL');
+  }
   const canvas = createCanvas(image.width, image.height);
   canvas.getContext('2d').drawImage(image, 0, 0);
   return canvas.encode('png');
@@ -111,7 +117,9 @@ export class PaddleOCRProvider extends BasePDFReader {
     }
 
     const result = await this.client.parse(source);
-    if (result.pages.length !== info.pageCount) {
+    // A pageCount of 0 means unpdf could not open the document (damaged or
+    // encrypted); the service may still read it, so there is nothing to check.
+    if (info.pageCount > 0 && result.pages.length !== info.pageCount) {
       // A service that capped or merged pages must not pass for blank pages.
       throw new PaddleOCRError(
         `PaddleOCR returned ${result.pages.length} pages for a ${info.pageCount}-page document`,
@@ -134,7 +142,7 @@ export class PaddleOCRProvider extends BasePDFReader {
     const texts: string[] = [];
     for (const image of images) {
       let data = imageBytes(image.data);
-      if (image.format === 'image/webp') {
+      if (canonicalizeImageFormat(image.format) === 'image/webp') {
         // extractImages() emits WebP by default.
         data = await webpToPng(data);
       } else if (!ENCODED_IMAGE_TYPES.has(image.format ?? '')) {

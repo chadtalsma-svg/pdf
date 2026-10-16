@@ -312,4 +312,26 @@ describe("getPDFReader({ provider: 'paddleocr' })", () => {
     );
     expect(calls).toHaveLength(0);
   });
+
+  it('sends a document unpdf cannot open and returns what the service read', async () => {
+    respond = (res) => json(res, envelope(['recovered']));
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      paddleocr: { baseUrl },
+    });
+    const damaged = Buffer.from('%PDF-1.7\nnot really a pdf');
+    expect(await reader.extractText(damaged)).toBe('recovered');
+  });
+
+  it('refuses a corrupt WebP as invalid input before any request', async () => {
+    const reader = await getPDFReader({
+      provider: 'paddleocr',
+      paddleocr: { baseUrl },
+    });
+    const error = await reader
+      .performOCR([{ data: new Uint8Array([1, 2, 3]), format: 'webp' }])
+      .catch((e) => e);
+    expect(error.code).toBe('EINVAL');
+    expect(calls).toHaveLength(0);
+  });
 });
